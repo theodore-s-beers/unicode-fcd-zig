@@ -17,8 +17,9 @@ pub fn main() !void {
     //
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
+
+    const allocator = gpa.allocator();
 
     //
     // Read UnicodeData.txt and normalize newlines
