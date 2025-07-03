@@ -11,6 +11,23 @@ const DecompMap = struct {
     }
 };
 
+const DecompEntryHeader = packed struct {
+    key: u32,
+    len: u8,
+};
+
+const DecompMapHeader = packed struct {
+    count: u32,
+    total_bytes: u32,
+};
+
+const FcdEntry = packed struct {
+    key: u32,
+    value: u16,
+};
+
+const MAX_BYTES: u32 = 1024 * 1024; // 1 MiB
+
 pub fn main() !void {
     //
     // Set up allocator
@@ -35,8 +52,16 @@ pub fn main() !void {
     // Load decomposition map
     //
 
-    var decomps: DecompMap = try loadDecomp(allocator);
-    defer decomps.deinit();
+    var decomp_bin = try std.fs.cwd().openFile("decomp.bin", .{});
+    defer decomp_bin.close();
+
+    var decomp_br = std.io.bufferedReader(decomp_bin.reader());
+    var decomp_map = try loadDecompMap(allocator, decomp_br.reader());
+    defer {
+        var it = decomp_map.iterator();
+        while (it.next()) |entry| allocator.free(entry.value_ptr.*);
+        decomp_map.deinit();
+    }
 
     //
     // Load CCC map
@@ -90,7 +115,7 @@ pub fn main() !void {
             continue;
         }
 
-        const decomp: []const u32 = decomps.map.get(code_point) orelse continue;
+        const decomp: []const u32 = decomp_map.get(code_point) orelse continue;
 
         const first_ccc: u8 = ccc_map.get(decomp[0]) orelse 0;
         const last_ccc: u8 = ccc_map.get(decomp[decomp.len - 1]) orelse 0;
@@ -102,7 +127,18 @@ pub fn main() !void {
     }
 
     //
-    // Write FCD map to a JSON file
+    // Write FCD map to binary file
+    //
+
+    var fcd_file = try std.fs.cwd().createFile("fcd.bin", .{ .truncate = true });
+    defer fcd_file.close();
+
+    var fcd_bw = std.io.bufferedWriter(fcd_file.writer());
+    try saveFcdMap(&fcd_map, fcd_bw.writer());
+    try fcd_bw.flush();
+
+    //
+    // Write FCD map to JSON file
     //
 
     const output_file = try std.fs.cwd().createFile("fcd.json", .{ .truncate = true });
@@ -123,7 +159,7 @@ pub fn main() !void {
     try ws.endObject();
 }
 
-fn loadDecomp(allocator: std.mem.Allocator) !DecompMap {
+fn loadDecompJson(allocator: std.mem.Allocator) !DecompMap {
     const path = "decomp.json";
     const json_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 66 * 1024);
     defer allocator.free(json_bytes);
@@ -164,6 +200,51 @@ fn loadDecomp(allocator: std.mem.Allocator) !DecompMap {
     return DecompMap{ .map = map, .allocator = allocator };
 }
 
+fn loadDecompMap(allocator: std.mem.Allocator, reader: anytype) !std.AutoHashMap(u32, []u32) {
+    const main_header = try reader.readStruct(DecompMapHeader);
+    const count = std.mem.littleToNative(u32, main_header.count);
+
+    const total_bytes = std.mem.littleToNative(u32, main_header.total_bytes);
+    if (total_bytes > MAX_BYTES) return error.FileTooLarge;
+
+    const payload = try allocator.alloc(u8, total_bytes);
+    defer allocator.free(payload);
+
+    try reader.readNoEof(payload);
+
+    var map = std.AutoHashMap(u32, []u32).init(allocator);
+    try map.ensureTotalCapacity(count);
+
+    var offset: usize = 0;
+    var n: u32 = 0;
+
+    while (n < count) : (n += 1) {
+        const header = std.mem.bytesToValue(
+            DecompEntryHeader,
+            payload[offset..][0..@sizeOf(DecompEntryHeader)],
+        );
+        offset += @sizeOf(DecompEntryHeader);
+
+        const key = std.mem.littleToNative(u32, header.key);
+
+        const values_len = header.len; // u8 has no endianness
+        const value_bytes = values_len * @sizeOf(u32);
+
+        const vals = try allocator.alloc(u32, values_len);
+        errdefer allocator.free(vals);
+
+        const payload_vals = std.mem.bytesAsSlice(u32, payload[offset..][0..value_bytes]);
+        for (payload_vals, vals) |src, *dst| {
+            dst.* = std.mem.littleToNative(u32, src);
+        }
+
+        try map.put(key, vals);
+        offset += value_bytes;
+    }
+
+    return map;
+}
+
 fn loadCCC(allocator: std.mem.Allocator) !std.AutoHashMap(u32, u8) {
     const path = "ccc.json";
     const json_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 20 * 1024);
@@ -191,4 +272,17 @@ fn loadCCC(allocator: std.mem.Allocator) !std.AutoHashMap(u32, u8) {
 
     parsed.deinit();
     return map;
+}
+
+fn saveFcdMap(map: *const std.AutoHashMap(u32, u16), writer: anytype) !void {
+    try writer.writeInt(u32, @intCast(map.count()), .little);
+
+    var it = map.iterator();
+    while (it.next()) |kv| {
+        const e = FcdEntry{
+            .key = std.mem.nativeToLittle(u32, kv.key_ptr.*),
+            .value = std.mem.nativeToLittle(u16, kv.value_ptr.*),
+        };
+        try writer.writeStruct(e);
+    }
 }
