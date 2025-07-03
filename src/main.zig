@@ -39,9 +39,6 @@ pub fn main() !void {
     // Load CCC map
     //
 
-    // var ccc_map: std.AutoHashMap(u32, u8) = try loadCCC(allocator);
-    // defer ccc_map.deinit();
-
     var ccc_in = try std.fs.cwd().openFile("ccc.bin", .{});
     defer ccc_in.close();
 
