@@ -1,33 +1,5 @@
 const std = @import("std");
 
-const DecompMap = struct {
-    map: std.AutoHashMap(u32, []const u32),
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *DecompMap) void {
-        var it = self.map.iterator();
-        while (it.next()) |e| self.allocator.free(e.value_ptr.*);
-        self.map.deinit();
-    }
-};
-
-const DecompEntryHeader = packed struct {
-    key: u32,
-    len: u8,
-};
-
-const DecompMapHeader = packed struct {
-    count: u32,
-    total_bytes: u32,
-};
-
-const FcdEntry = packed struct {
-    key: u32,
-    value: u16,
-};
-
-const MAX_BYTES: u32 = 1024 * 1024; // 1 MiB
-
 pub fn main() !void {
     //
     // Set up allocator
@@ -67,7 +39,14 @@ pub fn main() !void {
     // Load CCC map
     //
 
-    var ccc_map: std.AutoHashMap(u32, u8) = try loadCCC(allocator);
+    // var ccc_map: std.AutoHashMap(u32, u8) = try loadCCC(allocator);
+    // defer ccc_map.deinit();
+
+    var ccc_in = try std.fs.cwd().openFile("ccc.bin", .{});
+    defer ccc_in.close();
+
+    var ccc_br = std.io.bufferedReader(ccc_in.reader());
+    var ccc_map = try loadCccMap(allocator, ccc_br.reader());
     defer ccc_map.deinit();
 
     //
@@ -159,6 +138,104 @@ pub fn main() !void {
     try ws.endObject();
 }
 
+//
+// Types
+//
+
+const CccEntry = packed struct {
+    key: u32,
+    value: u8,
+};
+
+const DecompEntryHeader = packed struct {
+    key: u32,
+    len: u8,
+};
+
+const DecompMap = struct {
+    map: std.AutoHashMap(u32, []const u32),
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *DecompMap) void {
+        var it = self.map.iterator();
+        while (it.next()) |e| self.allocator.free(e.value_ptr.*);
+        self.map.deinit();
+    }
+};
+
+const DecompMapHeader = packed struct {
+    count: u32,
+    total_bytes: u32,
+};
+
+const FcdEntry = packed struct {
+    key: u32,
+    value: u16,
+};
+
+//
+// Constants
+//
+
+const MAX_BYTES: u32 = 1024 * 1024; // 1 MiB
+
+//
+// Load functions
+//
+
+fn loadCCC(allocator: std.mem.Allocator) !std.AutoHashMap(u32, u8) {
+    const path = "ccc.json";
+    const json_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 20 * 1024);
+    defer allocator.free(json_bytes);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    errdefer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return error.ExpectedTopLevelObject;
+
+    var map = std.AutoHashMap(u32, u8).init(allocator);
+    errdefer map.deinit();
+
+    var it = root.object.iterator();
+    while (it.next()) |entry| {
+        const cp = try std.fmt.parseInt(u32, entry.key_ptr.*, 10);
+
+        const val = entry.value_ptr.*;
+        if (val != .integer) return error.ExpectedNumber;
+
+        const ccc: u8 = @intCast(val.integer); // From i64
+        try map.put(cp, ccc);
+    }
+
+    parsed.deinit();
+    return map;
+}
+
+fn loadCccMap(allocator: std.mem.Allocator, reader: anytype) !std.AutoHashMap(u32, u8) {
+    const count = try reader.readInt(u32, .little);
+    const bytes_needed: usize = @as(usize, count) * @sizeOf(CccEntry);
+    if (bytes_needed > MAX_BYTES) return error.FileTooLarge;
+
+    const payload = try allocator.alloc(u8, bytes_needed);
+    defer allocator.free(payload);
+
+    try reader.readNoEof(payload);
+    const entries = std.mem.bytesAsSlice(CccEntry, payload);
+    std.debug.assert(entries.len == count);
+
+    var map = std.AutoHashMap(u32, u8).init(allocator);
+    try map.ensureTotalCapacity(count);
+
+    for (entries) |e| {
+        const key = std.mem.littleToNative(u32, e.key);
+        const value = e.value; // u8 has no endianness
+        try map.put(key, value);
+    }
+
+    return map;
+}
+
 fn loadDecompJson(allocator: std.mem.Allocator) !DecompMap {
     const path = "decomp.json";
     const json_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 66 * 1024);
@@ -245,34 +322,9 @@ fn loadDecompMap(allocator: std.mem.Allocator, reader: anytype) !std.AutoHashMap
     return map;
 }
 
-fn loadCCC(allocator: std.mem.Allocator) !std.AutoHashMap(u32, u8) {
-    const path = "ccc.json";
-    const json_bytes = try std.fs.cwd().readFileAlloc(allocator, path, 20 * 1024);
-    defer allocator.free(json_bytes);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
-    errdefer parsed.deinit();
-
-    const root = parsed.value;
-    if (root != .object) return error.ExpectedTopLevelObject;
-
-    var map = std.AutoHashMap(u32, u8).init(allocator);
-    errdefer map.deinit();
-
-    var it = root.object.iterator();
-    while (it.next()) |entry| {
-        const cp = try std.fmt.parseInt(u32, entry.key_ptr.*, 10);
-
-        const val = entry.value_ptr.*;
-        if (val != .integer) return error.ExpectedNumber;
-
-        const ccc: u8 = @intCast(val.integer); // From i64
-        try map.put(cp, ccc);
-    }
-
-    parsed.deinit();
-    return map;
-}
+//
+// Save functions
+//
 
 fn saveFcdMap(map: *const std.AutoHashMap(u32, u16), writer: anytype) !void {
     try writer.writeInt(u32, @intCast(map.count()), .little);
