@@ -106,21 +106,21 @@ pub fn main() !void {
     // Write FCD map to binary file
     //
 
-    var fcd_file = try std.fs.cwd().createFile("fcd.bin", .{ .truncate = true });
-    defer fcd_file.close();
+    var fcd_bin = try std.fs.cwd().createFile("fcd.bin", .{ .truncate = true });
+    defer fcd_bin.close();
 
-    var fcd_bw = std.io.bufferedWriter(fcd_file.writer());
+    var fcd_bw = std.io.bufferedWriter(fcd_bin.writer());
     try saveFcdMap(&fcd_map, fcd_bw.writer());
     try fcd_bw.flush();
 
     //
-    // Write FCD map to JSON file
+    // Also write map to JSON file for debugging
     //
 
-    const output_file = try std.fs.cwd().createFile("fcd.json", .{ .truncate = true });
-    defer output_file.close();
+    const fcd_json = try std.fs.cwd().createFile("fcd.json", .{ .truncate = true });
+    defer fcd_json.close();
 
-    var ws = std.json.writeStream(output_file.writer(), .{ .whitespace = .indent_2 });
+    var ws = std.json.writeStream(fcd_json.writer(), .{});
     try ws.beginObject();
 
     var map_iter = fcd_map.iterator();
